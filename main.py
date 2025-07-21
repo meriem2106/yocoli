@@ -2,7 +2,6 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from rembg import remove
 from PIL import Image
-import pillow_avif
 import torch
 import os
 import io
