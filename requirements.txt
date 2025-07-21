@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+rembg
+torch
+torchvision
+pillow
+pillow-avif-plugin
+python-dotenv
+python-multipart
+requests
