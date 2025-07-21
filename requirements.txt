@@ -8,3 +8,4 @@ pillow-avif-plugin
 python-dotenv
 python-multipart
 requests
+onnxruntime
