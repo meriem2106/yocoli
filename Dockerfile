@@ -1,17 +1,15 @@
-# Utilise une image officielle Python
 FROM python:3.10-slim
 
-# Définir le répertoire de travail
+# Installer uniquement ce qui est nécessaire
+RUN apt-get update && apt-get install -y gcc libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copier le fichier requirements.txt dans l'image Docker
 COPY requirements.txt .
 
-# Installer les dépendances Python
+# Installer en réduisant le cache
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copier tout le contenu du projet dans l'image Docker
 COPY . .
 
-# Commande pour démarrer le serveur FastAPI
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,11 +1,11 @@
 fastapi
 uvicorn[standard]
 rembg
-torch
-torchvision
+torch==2.2.2
+torchvision==0.17.2
 pillow
-pillow-avif-plugin
 python-dotenv
 python-multipart
 requests
 onnxruntime
+psutil
