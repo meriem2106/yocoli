@@ -19,7 +19,7 @@ app = FastAPI()
 def root():
     return {"message": "API is running"}
 
-# Initialiser le modèle (léger, pour Railway)
+# Charge modèle léger
 model = models.resnet18(weights="IMAGENET1K_V1")
 model.fc = torch.nn.Identity()
 model.eval()
@@ -31,7 +31,6 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
-# Charger les chemins vers les images de référence uniquement
 def load_ref_images(ref_dir="ref"):
     ref_images = {}
     for class_name in os.listdir(ref_dir):
@@ -39,32 +38,29 @@ def load_ref_images(ref_dir="ref"):
         if os.path.isdir(class_path):
             for fname in os.listdir(class_path):
                 if fname.lower().endswith((".png", ".jpg", ".jpeg", ".avif")):
-                    img_path = os.path.join(class_path, fname)
-                    ref_images.setdefault(class_name, []).append(img_path)
+                    ref_images.setdefault(class_name, []).append(os.path.join(class_path, fname))
     return ref_images
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # Lire l'image et supprimer le fond avec un modèle allégé
+        # Supprimer le fond
         session = new_session("u2net")
         image_bytes = await file.read()
-        no_bg_bytes = remove(image_bytes, session=session)
-        query_img = Image.open(io.BytesIO(no_bg_bytes)).convert("RGB")
+        no_bg = remove(image_bytes, session=session)
+        query_img = Image.open(io.BytesIO(no_bg)).convert("RGB")
 
-        # Charger chemins des images de référence
+        # Feature de l'image requête
+        query_tensor = transform(query_img).unsqueeze(0)
+        query_feat = model(query_tensor)
+
+        best_sim, best_label = -1, ""
         ref_images = load_ref_images()
 
-        best_sim = -1
-        best_label = ""
-
         with torch.no_grad():
-            query_tensor = transform(query_img).unsqueeze(0)
-            query_feat = model(query_tensor)
-
-            for label, image_paths in ref_images.items():
+            for label, paths in ref_images.items():
                 sims = []
-                for path in image_paths:
+                for path in paths:
                     try:
                         ref_img = Image.open(path).convert("RGB")
                         ref_tensor = transform(ref_img).unsqueeze(0)
@@ -73,30 +69,22 @@ async def predict(file: UploadFile = File(...)):
                         sims.append(sim)
                     except:
                         continue
-
                 if sims:
-                    avg_sim = sum(sims) / len(sims)
-                    if avg_sim > best_sim:
-                        best_sim = avg_sim
-                        best_label = label
+                    avg = sum(sims) / len(sims)
+                    if avg > best_sim:
+                        best_sim, best_label = avg, label
 
-        # Sauvegarder et uploader l'image résultante
-        os.makedirs("output", exist_ok=True)
-        filename = f"{best_label}.png"
-        file_path = os.path.join("output", filename)
-        with open(file_path, "wb") as f:
-            f.write(no_bg_bytes)
-
-        # Upload sur ImgBB
+        # Upload direct vers ImgBB
         imgbb_url = ""
-        with open(file_path, "rb") as f:
-            response = requests.post(
-                "https://api.imgbb.com/1/upload",
-                params={"key": IMGBB_API_KEY},
-                files={"image": (filename, f)}
-            )
-            if response.ok:
-                imgbb_url = response.json()["data"]["url"]
+        image_io = io.BytesIO(no_bg)
+        image_io.seek(0)
+        response = requests.post(
+            "https://api.imgbb.com/1/upload",
+            params={"key": IMGBB_API_KEY},
+            files={"image": ("output.png", image_io)}
+        )
+        if response.ok:
+            imgbb_url = response.json()["data"]["url"]
 
         return JSONResponse({
             "class": best_label,
