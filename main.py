@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
-from rembg import remove
+from rembg import remove, new_session
 from PIL import Image
 import torch
 import os
@@ -19,7 +19,7 @@ app = FastAPI()
 def root():
     return {"message": "API is running"}
 
-# Charger modèle une seule fois (léger et optimisé)
+# Initialiser le modèle (léger, pour Railway)
 model = models.resnet18(weights="IMAGENET1K_V1")
 model.fc = torch.nn.Identity()
 model.eval()
@@ -31,7 +31,7 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
-# Charger uniquement les chemins (pas les images en RAM)
+# Charger les chemins vers les images de référence uniquement
 def load_ref_images(ref_dir="ref"):
     ref_images = {}
     for class_name in os.listdir(ref_dir):
@@ -45,59 +45,67 @@ def load_ref_images(ref_dir="ref"):
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # Supprimer le fond
-    image_bytes = await file.read()
-    no_bg_bytes = remove(image_bytes)
-    query_img = Image.open(io.BytesIO(no_bg_bytes)).convert("RGB")
+    try:
+        # Lire l'image et supprimer le fond avec un modèle allégé
+        session = new_session("u2net")
+        image_bytes = await file.read()
+        no_bg_bytes = remove(image_bytes, session=session)
+        query_img = Image.open(io.BytesIO(no_bg_bytes)).convert("RGB")
 
-    # Charger les chemins des images
-    ref_images = load_ref_images()
+        # Charger chemins des images de référence
+        ref_images = load_ref_images()
 
-    best_sim = -1
-    best_label = ""
+        best_sim = -1
+        best_label = ""
 
-    with torch.no_grad():
-        query_tensor = transform(query_img).unsqueeze(0)
-        query_feat = model(query_tensor)
+        with torch.no_grad():
+            query_tensor = transform(query_img).unsqueeze(0)
+            query_feat = model(query_tensor)
 
-        for label, image_paths in ref_images.items():
-            sims = []
-            for path in image_paths:
-                try:
-                    ref_img = Image.open(path).convert("RGB")
-                    ref_tensor = transform(ref_img).unsqueeze(0)
-                    ref_feat = model(ref_tensor)
-                    sim = F.cosine_similarity(query_feat, ref_feat).item()
-                    sims.append(sim)
-                except Exception:
-                    continue
+            for label, image_paths in ref_images.items():
+                sims = []
+                for path in image_paths:
+                    try:
+                        ref_img = Image.open(path).convert("RGB")
+                        ref_tensor = transform(ref_img).unsqueeze(0)
+                        ref_feat = model(ref_tensor)
+                        sim = F.cosine_similarity(query_feat, ref_feat).item()
+                        sims.append(sim)
+                    except:
+                        continue
 
-            if sims:
-                avg_sim = sum(sims) / len(sims)
-                if avg_sim > best_sim:
-                    best_sim = avg_sim
-                    best_label = label
+                if sims:
+                    avg_sim = sum(sims) / len(sims)
+                    if avg_sim > best_sim:
+                        best_sim = avg_sim
+                        best_label = label
 
-    # Sauvegarde temporaire
-    os.makedirs("output", exist_ok=True)
-    filename = f"{best_label}.png"
-    file_path = os.path.join("output", filename)
-    with open(file_path, "wb") as f:
-        f.write(no_bg_bytes)
+        # Sauvegarder et uploader l'image résultante
+        os.makedirs("output", exist_ok=True)
+        filename = f"{best_label}.png"
+        file_path = os.path.join("output", filename)
+        with open(file_path, "wb") as f:
+            f.write(no_bg_bytes)
 
-    # Upload ImgBB
-    imgbb_url = ""
-    with open(file_path, "rb") as f:
-        response = requests.post(
-            "https://api.imgbb.com/1/upload",
-            params={"key": IMGBB_API_KEY},
-            files={"image": (filename, f)}
+        # Upload sur ImgBB
+        imgbb_url = ""
+        with open(file_path, "rb") as f:
+            response = requests.post(
+                "https://api.imgbb.com/1/upload",
+                params={"key": IMGBB_API_KEY},
+                files={"image": (filename, f)}
+            )
+            if response.ok:
+                imgbb_url = response.json()["data"]["url"]
+
+        return JSONResponse({
+            "class": best_label,
+            "similarity": round(best_sim, 4),
+            "image_url": imgbb_url
+        })
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Prediction failed", "details": str(e)}
         )
-        if response.ok:
-            imgbb_url = response.json()["data"]["url"]
-
-    return JSONResponse({
-        "class": best_label,
-        "similarity": round(best_sim, 4),
-        "image_url": imgbb_url
-    })
