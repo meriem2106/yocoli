@@ -19,7 +19,7 @@ app = FastAPI()
 def root():
     return {"message": "API is running"}
 
-# Modèle
+# Charger modèle une seule fois (léger et optimisé)
 model = models.resnet18(weights="IMAGENET1K_V1")
 model.fc = torch.nn.Identity()
 model.eval()
@@ -31,6 +31,7 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
+# Charger uniquement les chemins (pas les images en RAM)
 def load_ref_images(ref_dir="ref"):
     ref_images = {}
     for class_name in os.listdir(ref_dir):
@@ -38,21 +39,18 @@ def load_ref_images(ref_dir="ref"):
         if os.path.isdir(class_path):
             for fname in os.listdir(class_path):
                 if fname.lower().endswith((".png", ".jpg", ".jpeg", ".avif")):
-                    try:
-                        img = Image.open(os.path.join(class_path, fname)).convert("RGB")
-                        ref_images.setdefault(class_name, []).append(img)
-                    except:
-                        continue
+                    img_path = os.path.join(class_path, fname)
+                    ref_images.setdefault(class_name, []).append(img_path)
     return ref_images
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # Lecture + suppression du fond
+    # Supprimer le fond
     image_bytes = await file.read()
     no_bg_bytes = remove(image_bytes)
     query_img = Image.open(io.BytesIO(no_bg_bytes)).convert("RGB")
 
-    # Chargement des images de référence
+    # Charger les chemins des images
     ref_images = load_ref_images()
 
     best_sim = -1
@@ -62,27 +60,32 @@ async def predict(file: UploadFile = File(...)):
         query_tensor = transform(query_img).unsqueeze(0)
         query_feat = model(query_tensor)
 
-        for label, images in ref_images.items():
+        for label, image_paths in ref_images.items():
             sims = []
-            for ref_img in images:
-                ref_tensor = transform(ref_img).unsqueeze(0)
-                ref_feat = model(ref_tensor)
-                sim = F.cosine_similarity(query_feat, ref_feat).item()
-                sims.append(sim)
+            for path in image_paths:
+                try:
+                    ref_img = Image.open(path).convert("RGB")
+                    ref_tensor = transform(ref_img).unsqueeze(0)
+                    ref_feat = model(ref_tensor)
+                    sim = F.cosine_similarity(query_feat, ref_feat).item()
+                    sims.append(sim)
+                except Exception:
+                    continue
 
-            avg_sim = sum(sims) / len(sims)
-            if avg_sim > best_sim:
-                best_sim = avg_sim
-                best_label = label
+            if sims:
+                avg_sim = sum(sims) / len(sims)
+                if avg_sim > best_sim:
+                    best_sim = avg_sim
+                    best_label = label
 
-    # Enregistrement temporaire du fichier
+    # Sauvegarde temporaire
     os.makedirs("output", exist_ok=True)
     filename = f"{best_label}.png"
     file_path = os.path.join("output", filename)
     with open(file_path, "wb") as f:
         f.write(no_bg_bytes)
 
-    # Upload vers ImgBB
+    # Upload ImgBB
     imgbb_url = ""
     with open(file_path, "rb") as f:
         response = requests.post(
@@ -98,4 +101,3 @@ async def predict(file: UploadFile = File(...)):
         "similarity": round(best_sim, 4),
         "image_url": imgbb_url
     })
-
